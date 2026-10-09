@@ -1,0 +1,25 @@
+# Ignore everything at repository root
+/*
+
+# Keep assignments
+!/Assignment1/
+!/Assignment2/
+!/.gitignore
+
+# Python cache
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Trained models and artifacts
+/Assignment2/models/
+/Assignment2/artifacts/
+
+# Datasets
+*.npz
+
+# Other generated files
+*.pkl
+
+# Editor
+.vscode/
