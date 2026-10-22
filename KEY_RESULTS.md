@@ -2,6 +2,8 @@
 
 This summary covers the four published results notebooks. Numbers come from their saved outputs and supporting discussion; the experiments have not been rerun for this document. Where timing prose and saved outputs differ, the saved outputs take precedence. Runtime measurements depend on the execution environment.
 
+**How to interpret timings.** Wall-clock timings naturally vary between benchmark executions, even with unchanged code and inputs. System scheduling, background activity, cache state, and numerical-library overhead can contribute; their individual effects were not isolated here. To mitigate measurement variability, both studies use warm-up calls and 100 timed repetitions. The mixing benchmark takes the median of repeated per-query batch timings; the POD-NN benchmark reports the median of complete-trajectory timings alongside the mean and standard deviation, and synchronizes CUDA when applicable. Medians reduce sensitivity to occasional slow measurements but do not eliminate differences between executions or make timings hardware-independent. Different benchmark runs can therefore produce different latency and speedup estimates without a change in model accuracy. This expected variability should be distinguished from stale narrative values or a mislabeled statistic; it does not, by itself, establish the cause of every reporting difference.
+
 **Navigation:** cell numbers below count every cell from one, including Markdown cells; they are not Jupyter execution counts. Section titles and function names provide additional search targets. Source links point to the implementations used by the notebooks.
 
 ## 1. Chemical mixing: reduced modeling and optimization
@@ -73,7 +75,7 @@ The low average test error meets the study's 10% mean-error target, but individu
 
 ### Runtime and offline investment
 
-The saved online benchmark reports **41.596 ms median latency** and **313.8× mean-based speedup** relative to a supplied FOM reference of **19.33 s per complete trajectory**. The timing-distribution cell gives a mean/median ratio of **1.48**, showing substantial variability.
+The saved online benchmark reports **41.596 ms median latency** and **313.8× mean-based speedup** relative to a supplied FOM reference of **19.33 s per complete trajectory**. The timing-distribution cell gives a mean/median ratio of **1.48**, showing substantial variability. The median is the robust typical-latency summary; the saved speedup uses the mean instead. Using that median as the denominator gives approximately **465×**, a separate median-based estimate.
 
 **Reporting discrepancy:** cell 75 labels the median as both “ROM mean” and “ROM median” because `t_rom = benchmark["median"]`. The actual speedup comes from `benchmark["speedup"]`, which uses the mean; it implies a mean latency of approximately **61.6 ms**. The prose still quotes an earlier 34.90 ms / 554× benchmark. These different timing summaries must not be combined as one measurement.
 
