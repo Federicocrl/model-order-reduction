@@ -1,12 +1,12 @@
-"""Supporto POD-NN per u-bolt: POD e metriche nella norma L2 FEM.
+"""POD-NN utilities for U-bolt damage propagation in the FEM L2 norm.
 
-Convenzioni: u=(n_trajectories,n_times,n_dofs), S=(n_snapshots,n_dofs),
-V=(n_dofs,n_modes), A=(n_snapshots,n_modes). Ordine trajectory-major.
-M deve essere simmetrica definita positiva e avere lo stesso ordinamento DOF
- dei dati. Nessuna operazione FEM, download o training viene eseguita all'import.
-NumPy/SciPy sono obbligatori; torch, matplotlib e dlroms sono importati solo
-nelle funzioni che li utilizzano. Vedere support_functions_guide.md.
-"""
+Arrays use trajectory-major order: fields u=(n_trajectories,n_times,n_dofs),
+snapshots S=(n_snapshots,n_dofs), basis V=(n_dofs,n_modes), and coefficients
+A=(n_snapshots,n_modes). The mass matrix must be symmetric positive definite
+and use exactly the dataset DOF ordering. Importing this module does not run
+FEM calculations, downloads, or training. NumPy/SciPy are required at import;
+PyTorch, Matplotlib, and dlroms are imported by the functions that need them.
+See support_functions_guide.md for the workflow."""
 from dataclasses import dataclass
 import copy
 import random
@@ -17,7 +17,7 @@ from scipy.linalg import eigh
 
 @dataclass
 class PODResult:
-    """Risultato POD: basis, singular_values, cumulative_energy, total_energy."""
+    """Store the POD basis, singular values, cumulative energy fractions, and total energy."""
     basis: np.ndarray
     singular_values: np.ndarray
     cumulative_energy: np.ndarray
@@ -26,26 +26,41 @@ class PODResult:
 
 @dataclass
 class CoefficientScaler:
-    """minimum e scale per modo; scale=1 per coefficienti costanti."""
+    """Store per-mode minima and ranges; constant modes use a range of one."""
     minimum: np.ndarray
     scale: np.ndarray
 
 
 def build_ubolt_mesh(stepsize=0.05, knots=30):
-    """Geometria dal notebook del corso, incapsulata senza variabili globali.
+    """Build the course U-bolt mesh and return (mesh, scalar CG1 space).
 
-    Input: stepsize positivo, knots>=3 punti per arco. Per il dataset fornito
-    mantenere stepsize=0.05 e knots=30. Output: mesh, Vh (CG1 scalare).
-    Serve PRIMA della POD. Stessa dimensione DOF non garantisce stesso ordine:
-    utilizzare la stessa pipeline di mesh del dataset e verificarne i plot.
-    """
+    stepsize must be positive and knots must be at least three. Use stepsize=0.05
+    and knots=30 for the supplied dataset. Construct the mesh before computing
+    POD. Matching DOF counts does not guarantee matching DOF ordering: use the
+    dataset mesh pipeline and inspect the reconstructed fields."""
     import dlroms.fespaces as fe
+    import os
+    import shutil
+    from pathlib import Path
+
+    # Selecting a Python environment in VS Code bypasses kernelspec PATH.
+    # dlroms and its gmsh executable live in the same installed environment.
+    if shutil.which('gmsh') is None:
+        gmsh_bin = Path(fe.__file__).resolve().parents[4] / 'bin'
+        if (gmsh_bin / 'gmsh').is_file():
+            os.environ['PATH'] = str(gmsh_bin) + os.pathsep + os.environ.get('PATH', '')
+        else:
+            raise RuntimeError('gmsh executable not found: cannot construct the U-bolt mesh')
+    if shutil.which('dolfin-convert') is None:
+        raise RuntimeError('dolfin-convert executable not found: cannot convert the U-bolt mesh')
     if stepsize <= 0 or knots < 3:
         raise ValueError('stepsize>0 e knots>=3 richiesti')
     points = [np.array([0., 0.])]
     def step(z):
+        """Append a boundary vertex using the real and imaginary parts of displacement z."""
         points.append(points[-1] + [z.real, z.imag])
     def arch(r, thetas):
+        """Append a circular boundary arc with complex radius r and angular limits thetas."""
         center = points[-1] + [r.real, r.imag]
         shift = abs(r)*np.exp(1j*np.linspace(*thetas, knots)[1:])
         points.extend(np.stack([center[0]+shift.real, center[1]+shift.imag], axis=1))
@@ -62,21 +77,34 @@ def build_ubolt_mesh(stepsize=0.05, knots=30):
 
 
 def assemble_mass_matrix(Vh):
-    """Restituisce M_ij=integrale phi_i phi_j tramite API fe.assemble del corso.
+    """Assemble M[i,j] = integral(phi_i * phi_j) on the scalar FEM space Vh.
 
-    Vh: spazio FEM scalare. Mantiene la rappresentazione restituita da dlroms;
-    nelle routine numeriche M deve essere array NumPy o matrice sparse SciPy.
-    """
+    Return the representation provided by dlroms. Numerical routines expect a
+    NumPy array or a SciPy sparse matrix with the dataset DOF ordering."""
     import dlroms.fespaces as fe
     return fe.assemble(lambda u, v: fe.inner(u, v)*fe.dx, Vh)
 
 
-def modify_jet_to_gray(jet_colors=None):
-    """Colormap del corso: i primi 85 colori di jet diventano grigi.
+def check_fem_conversion(values, Vh):
+    """Fail if the NumPy-to-FEniCS conversion silently changes field values."""
+    import dlroms.fespaces as fe
+    expected = np.ascontiguousarray(values, dtype=np.float64)
+    if expected.shape != (Vh.dim(),):
+        raise ValueError('Expected one field with Vh.dim() DOFs')
+    actual = fe.asfunction(expected, Vh).vector().get_local()
+    if not np.array_equal(actual, expected):
+        raise RuntimeError(
+            'NumPy-to-FEniCS conversion changed the field values. '
+            'Select the U-bolt (NumPy 1.26) kernel and restart it.'
+        )
 
-    jet_colors opzionale: array (256,4). Restituisce ListedColormap; passare
-    l'oggetto ai plot, senza dipendere da registrazioni globali di 'gray_jet'.
-    """
+
+def modify_jet_to_gray(jet_colors=None):
+    """Return a ListedColormap with the first 85 jet colors replaced by gray.
+
+    jet_colors optionally supplies an RGBA array of shape (256,4). Pass the
+    returned colormap directly to plotting functions; no global registration
+    of the name gray_jet is required."""
     import matplotlib as mpl
     from matplotlib.colors import ListedColormap
     colors = (mpl.colormaps['jet'](np.linspace(0, 1, 256))
@@ -88,12 +116,11 @@ def modify_jet_to_gray(jet_colors=None):
 
 
 def build_damage_evaluator(mesh, Vh, x0=(0.5, 3.0), device='cpu'):
-    """Evaluate del corso nel punto x0 o nei punti (n_points,2).
+    """Build a PyTorch FEM evaluation operator for one or more spatial points.
 
-    Restituisce un operatore torch: evaluator(tensor(Nt,Nh)) -> (Nt,n_points).
-    Serve per misure puntuali/task inverso; i dati passati devono trovarsi sullo
-    stesso device dell'operatore. Non converte automaticamente gli input.
-    """
+    x0 is a point (2,) or an array (n_points,2). The returned operator maps
+    fields of shape (n_times,n_dofs) to (n_times,n_points). Input tensors must
+    already be on the requested device; this function does not convert them."""
     from dlroms.minns import Evaluate
     evaluator = Evaluate(mesh, Vh, np.asarray(x0, dtype=float).reshape(-1, 2))
     evaluator.to(device)
@@ -101,6 +128,7 @@ def build_damage_evaluator(mesh, Vh, x0=(0.5, 3.0), device='cpu'):
 
 
 def _fields(fields):
+    """Convert fields to a finite float64 array with at least one axis."""
     x = np.asarray(fields, dtype=np.float64)
     if x.ndim < 1 or not np.isfinite(x).all():
         raise ValueError('Campi finiti con almeno un asse richiesti')
@@ -108,7 +136,7 @@ def _fields(fields):
 
 
 def _mass_apply(M, fields):
-    """Applicazione sparse-safe lungo l'ultimo asse, senza densificare M."""
+    """Apply M along the last field axis without converting a sparse M to dense."""
     x = _fields(fields)
     if M.shape != (x.shape[-1], x.shape[-1]):
         raise ValueError('M e numero DOF incompatibili')
@@ -116,16 +144,15 @@ def _mass_apply(M, fields):
 
 
 def compute_l2_pod(snapshots, M, max_modes=100, rtol=1e-12):
-    """POD non centrata tramite metodo degli snapshot C=S M S.T.
+    """Compute an uncentered mass-weighted POD using C = S @ M @ S.T.
 
-    S: (Ns,Nh) SOLO training; M: (Nh,Nh) SPD, densa o sparse; max_modes:
-    limite positivo ai modi; rtol: soglia relativa per autovalori numericamente
-    nulli. Restituisce PODResult. Non sottrae la media e non pesa i tempi.
-    lambda_i,q_i di C danno V_i=S.T q_i/sqrt(lambda_i); V.T M V=I.
-    Energia totale=trace(C), NON somma dei soli autovalori estratti.
-    Memoria O(Ns^2), costo di costruzione C rilevante: non chiamare nel tuning.
-    Metodi basati su C perdono precisione sui modi molto piccoli.
-    """
+    snapshots is a training-only array S of shape (n_snapshots,n_dofs); M is a
+    dense or sparse symmetric positive definite mass matrix. max_modes limits
+    the number of modes; rtol discards eigenvalues below rtol times the largest.
+    Return PODResult with V.T @ M @ V = I and total_energy = trace(C), including
+    energy outside the extracted modes. No mean subtraction or time weighting
+    is applied. The correlation matrix requires O(n_snapshots**2) memory, and
+    very small modes may lose numerical accuracy. Compute POD once, before tuning."""
     S = _fields(snapshots)
     if S.ndim != 2 or not S.size or max_modes < 1 or not 0 < rtol < 1:
         raise ValueError('S 2D non vuota, max_modes>=1, 0<rtol<1 richiesti')
@@ -145,25 +172,25 @@ def compute_l2_pod(snapshots, M, max_modes=100, rtol=1e-12):
 
 
 def project_l2(snapshots, basis, M):
-    """A=S M V per base M-ortonormale. Supporta (...,Nh) -> (...,N).
+    """Project fields onto an M-orthonormal basis using A = S @ M @ V.
 
-    Usare per train/validation/test, senza ricostruire la POD sui nuovi dati.
-    """
+    Map (...,n_dofs) to (...,n_modes). Reuse the training basis for validation
+    and test data rather than fitting a new POD."""
     return _mass_apply(M, snapshots) @ np.asarray(basis)
 
 
 def reconstruct_pod(coefficients, basis):
-    """A V.T: (...,N) -> (...,Nh), indipendente dalla norma della POD."""
+    """Reconstruct fields as A @ V.T, mapping (...,n_modes) to (...,n_dofs)."""
     return np.asarray(coefficients) @ np.asarray(basis).T
 
 
 def make_nn_inputs(mu, time_grid):
-    """mu=(ntraj,nparam), tempi=(Nt,) crescenti, iniziano da zero e T>0.
+    """Return trajectory-major network inputs with normalized time t/T.
 
-    Output (ntraj*Nt,nparam+1), con tempo t/T. Ogni traiettoria occupa un
-    blocco di Nt righe, coerente con u.reshape(-1,Nh). Non scala i parametri:
-    per u-bolt sono gia in [0,1].
-    """
+    mu has shape (n_trajectories,n_parameters). time_grid is strictly increasing,
+    starts at zero, and contains at least two times. Return an array of shape
+    (n_trajectories*n_times,n_parameters+1), consistent with u.reshape(-1,n_dofs).
+    Physical parameters are not rescaled; the U-bolt parameters are already in [0,1]."""
     mu, t = _fields(mu), _fields(time_grid)
     if mu.ndim != 2 or t.ndim != 1 or len(t)<2 or t[0]!=0 or np.any(np.diff(t)<=0):
         raise ValueError('mu 2D, t crescente da zero con almeno due punti')
@@ -171,11 +198,11 @@ def make_nn_inputs(mu, time_grid):
 
 
 def fit_coefficient_scaler(A_train):
-    """Fit min-max per modo SOLO su A_train=(Ns,N). Output CoefficientScaler.
+    """Fit per-mode min-max scaling on training coefficients only.
 
-    Range esattamente nullo sostituito da 1 per evitare divisione per zero.
-    Validation/test possono uscire da [0,1]: non vengono tagliati.
-    """
+    A_train has shape (n_snapshots,n_modes). Return CoefficientScaler, replacing
+    exactly zero ranges with one. Validation/test values may lie outside [0,1]
+    and are not clipped."""
     A = _fields(A_train)
     if A.ndim != 2 or not A.size:
         raise ValueError('A_train 2D non vuoto richiesto')
@@ -184,6 +211,7 @@ def fit_coefficient_scaler(A_train):
 
 
 def _scaler_arrays(A, scaler):
+    """Return scaling arrays compatible with the NumPy input or PyTorch dtype/device."""
     if hasattr(A, 'detach') and hasattr(A, 'device'):
         import torch
         return (torch.as_tensor(scaler.minimum, dtype=A.dtype, device=A.device),
@@ -192,19 +220,19 @@ def _scaler_arrays(A, scaler):
 
 
 def scale_coefficients(A, scaler):
-    """(A-minimum)/scale; NumPy o torch, preservando device e gradienti."""
+    """Apply (A-minimum)/scale, preserving PyTorch device and gradients."""
     minimum, scale = _scaler_arrays(A, scaler)
     return (A-minimum)/scale
 
 
 def unscale_coefficients(A_scaled, scaler):
-    """A_scaled*scale+minimum; NumPy o torch, preservando gradienti."""
+    """Apply A_scaled*scale+minimum, preserving PyTorch device and gradients."""
     minimum, scale = _scaler_arrays(A_scaled, scaler)
     return A_scaled*scale+minimum
 
 
 def set_seed(seed):
-    """Seed Python/NumPy/torch/CUDA. Non garantisce determinismo bit per bit."""
+    """Seed Python, NumPy, PyTorch, and CUDA without guaranteeing bitwise determinism."""
     random.seed(seed)
     np.random.seed(seed)
     import torch
@@ -215,11 +243,11 @@ def set_seed(seed):
 
 def build_model(input_dim, output_dim, hidden_layers=(128,)*5,
                 activation='silu', device='cpu'):
-    """MLP torch con uscita LINEARE: nessun clipping/sigmoid dei coefficienti.
+    """Build a PyTorch MLP with a linear, unclipped coefficient output.
 
-    input_dim=nparam+1; output_dim=N POD; hidden_layers: larghezze positive.
-    activation: leaky_relu (slope .1), tanh, silu o relu; device cpu/cuda.
-    """
+    input_dim is usually n_parameters+1 and output_dim is the POD dimension.
+    hidden_layers gives positive layer widths. activation is leaky_relu (slope
+    0.1), tanh, silu, or relu. Return the network on the requested device."""
     import torch.nn as nn
     choices = {'leaky_relu': lambda: nn.LeakyReLU(.1), 'tanh': nn.Tanh,
                'silu': nn.SiLU, 'relu': nn.ReLU}
@@ -234,16 +262,15 @@ def build_model(input_dim, output_dim, hidden_layers=(128,)*5,
 
 
 def count_parameters(model):
-    """Numero di parametri torch con requires_grad=True."""
+    """Return the number of PyTorch parameters with requires_grad=True."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 def coefficient_loss(pred_scaled, target, scaler):
-    """MSE tra coefficienti denormalizzati e target NON scalati (tensor).
+    """Return MSE between unscaled predictions and unscaled target tensors.
 
-    Con V.T M V=I equivale a errore L2 spaziale quadratico di regressione,
-    diviso per N modi. Non equivale alla media dell'errore RELATIVO L2.
-    """
+    For an M-orthonormal POD basis, this is the squared spatial L2 regression
+    error averaged over samples and modes. It is not mean relative L2 error."""
     return ((unscale_coefficients(pred_scaled, scaler)-target)**2).mean()
 
 
@@ -252,16 +279,17 @@ def train_model(X_train, A_train, X_val, A_val, scaler, *,
                 weight_decay=1e-4, max_epochs=1500, batch_size=64,
                 device='cpu', seed=42, scheduler_patience=100,
                 scheduler_factor=0.5, log_every=250):
-    """Training da zero; input e target NumPy 2D, coefficienti NON scalati.
+    """Train a new POD-NN using 2D NumPy inputs and unscaled coefficients.
 
-    Crea internamente tensor float32, DataLoader shuffle, Adam e scheduler
-    ReduceLROnPlateau sulla coefficient_loss di validation. Tutte le epoche
-    vengono eseguite (nessun early stopping). Ripristina il minimo di validation.
-    Restituisce dict: model, train_history, val_history, best_val_loss,
-    best_epoch (1-based), config. I valori train sono medie durante gli update;
-    val si calcola a fine epoca. seed impostato PRIMA di creare rete e loader.
-    Non usa test, M o campi FOM. Lo scaler deve essere gia fit sul training.
-    """
+    Create float32 tensors, a shuffled training DataLoader, Adam, and a
+    ReduceLROnPlateau scheduler driven by validation coefficient_loss. Run all
+    max_epochs without early stopping, then restore the lowest-validation-loss
+    weights. Seed initialization precedes network and loader creation. The scaler
+    must already be fitted on training data; test data and FOM fields are unused.
+
+    Return a dictionary containing model, train_history, val_history,
+    best_val_loss, best_epoch (one-based), and config. Training losses are
+    averaged during updates; validation loss is measured at each epoch end."""
     import torch
     from torch.utils.data import TensorDataset, DataLoader
     arrays = [np.asarray(x) for x in (X_train, A_train, X_val, A_val)]
@@ -318,10 +346,11 @@ def train_model(X_train, A_train, X_val, A_val, scaler, *,
 
 
 def predict_coefficients(model, X, scaler, batch_size=4096):
-    """X NumPy/tensor (Ns,input_dim) -> NumPy (Ns,N), in batch, senza gradienti.
+    """Predict unscaled coefficients in batches without tracking gradients.
 
-    Inferisce device/dtype dalla rete; ripristina il precedente stato train/eval.
-    """
+    X is a NumPy array or tensor of shape (n_samples,input_dim). Infer device and
+    dtype from the model and return a NumPy array (n_samples,n_modes). Restore
+    the model's previous training/evaluation state after inference."""
     import torch
     if batch_size<1 or len(X)==0:
         raise ValueError('batch_size positivo e X non vuoto richiesti')
@@ -338,16 +367,15 @@ def predict_coefficients(model, X, scaler, batch_size=4096):
 
 
 def predict_solution(model, X, scaler, basis, batch_size=4096):
-    """Input appiattiti -> snapshot ricostruiti (Ns,Nh), NumPy."""
+    """Return reconstructed NumPy fields (n_samples,n_dofs) for flattened inputs X."""
     return reconstruct_pod(predict_coefficients(model, X, scaler, batch_size), basis)
 
 
 def l2_norm(fields, M):
-    """sqrt(u.T M u) su ultimo asse: (...,Nh) -> (...).
+    """Compute sqrt(u.T @ M @ u) along the last axis: (...,n_dofs) -> (...).
 
-    Piccoli negativi di roundoff sono tagliati a zero; negativi significativi
-    segnalano una matrice di massa/input non validi.
-    """
+    Clip small negative roundoff values to zero. Substantially negative squared
+    norms raise ValueError because they indicate invalid fields or a mass matrix."""
     x = _fields(fields)
     squares = np.sum(x*_mass_apply(M, x), axis=-1)
     if np.any(squares < -1e-12*max(1., float(np.max(np.abs(squares))))):
@@ -356,12 +384,11 @@ def l2_norm(fields, M):
 
 
 def relative_l2_error(u_true, u_pred, M, zero_policy='raise', zero_tol=0.):
-    """||u_true-u_pred||L2 / ||u_true||L2; output in FRAZIONE, non percentuale.
+    """Return ||u_true-u_pred||_M / ||u_true||_M as fractions, not percentages.
 
-    Campi con shape identica (...,Nh). zero_policy='raise' (default) oppure
-    'nan': snapshot con norma<=zero_tol esclusi esplicitamente dai riepiloghi.
-    Non sostituisce il denominatore con epsilon: altererebbe la metrica.
-    """
+    Fields must have identical shape (...,n_dofs). For reference norms at or below
+    zero_tol, zero_policy='raise' fails and 'nan' returns NaN for exclusion by
+    summarize_errors. The denominator is not replaced with an epsilon."""
     true, pred = _fields(u_true), _fields(u_pred)
     if true.shape!=pred.shape or zero_policy not in ('raise', 'nan') or zero_tol<0:
         raise ValueError('Shape, zero_policy o zero_tol non validi')
@@ -374,13 +401,14 @@ def relative_l2_error(u_true, u_pred, M, zero_policy='raise', zero_tol=0.):
 
 
 def summarize_errors(errors):
-    """errors=(ntraj,Nt), frazioni. Media temporale aritmetica per traiettoria.
+    """Summarize fractional errors of shape (n_trajectories,n_times).
 
-    Con NaN esclude snapshot non definiti; restituisce anche excluded_snapshots.
-    Fallisce se una traiettoria non ha snapshot validi. Non e norma L2 nel tempo.
-    Output dict: mean_error, worst_trajectory_error, max_snapshot_error,
-    trajectory_errors, best_index, representative_index, worst_index.
-    """
+    Average over valid times within each trajectory, then over trajectories.
+    Ignore NaN snapshots but fail if an entire trajectory is undefined. This is
+    an arithmetic time average, not a temporal L2 norm. Return mean_error,
+    median_error, worst_trajectory_error, max_snapshot_error, trajectory_errors,
+    best_index, representative_index (closest to the mean), worst_index, and
+    excluded_snapshots."""
     e = np.asarray(errors)
     if e.ndim!=2 or not e.size or np.isinf(e).any() or np.any(e<0) or np.any(np.all(np.isnan(e), axis=1)):
         raise ValueError('Errori 2D validi con almeno un valore per traiettoria')
@@ -395,11 +423,11 @@ def summarize_errors(errors):
 
 
 def evaluate_model_L2(model, X, u_true, basis, M, scaler, *, zero_policy='raise'):
-    """Valuta train/validation/test con stessa API; u_true=(ntraj,Nt,Nh).
+    """Predict fields and summarize their relative spatial L2 errors.
 
-    X deve seguire make_nn_inputs. Restituisce dict di summarize_errors piu
-    errors=(ntraj,Nt), prediction con shape di u_true. Nessun uso di mu globale.
-    """
+    u_true has shape (n_trajectories,n_times,n_dofs); X must follow
+    make_nn_inputs ordering. Return summarize_errors entries plus errors of
+    shape (n_trajectories,n_times) and prediction with the same shape as u_true."""
     u = _fields(u_true)
     if u.ndim!=3 or len(X)!=u.shape[0]*u.shape[1]:
         raise ValueError('u_true 3D e numero input coerente richiesti')
@@ -410,12 +438,12 @@ def evaluate_model_L2(model, X, u_true, basis, M, scaler, *, zero_policy='raise'
 
 def run_experiments(configurations, X_train, A_train, X_val, A_val,
                     scaler, u_val, basis, M, *, device='cpu', zero_policy='raise'):
-    """configurations: dict nome -> kwargs di train_model (architettura,seed,...).
+    """Train named configurations and evaluate them on validation data.
 
-    Restituisce dict nome -> risultato training piu evaluation e parameters.
-    Usa SOLO validation; non sceglie automaticamente il vincitore. Trattiene
-    modelli e campi ricostruiti: usare poche configurazioni per limitare memoria.
-    """
+    configurations maps names to train_model keyword arguments. Return a mapping
+    from each name to its training result plus evaluation and parameter count.
+    No winner is selected automatically. Results retain models and reconstructed
+    fields, so use small configuration batches to control memory usage."""
     results = {}
     for name, config in configurations.items():
         print(f'Experiment: {name}')
@@ -430,7 +458,7 @@ def run_experiments(configurations, X_train, A_train, X_val, A_val,
 
 
 def plot_training_history(train_history, val_history, ax=None):
-    """Grafico semilog MSE denormalizzata; restituisce ax, non chiama show."""
+    """Plot unscaled coefficient MSE on a logarithmic y-axis; return ax without showing."""
     import matplotlib.pyplot as plt
     if ax is None:
         _, ax = plt.subplots(figsize=(7, 4))
@@ -443,7 +471,10 @@ def plot_training_history(train_history, val_history, ax=None):
 
 
 def plot_error_evolution(time_grid, errors, ax=None):
-    """errors: dict etichetta -> frazioni (Nt,), convertite in % nel grafico."""
+    """Plot relative spatial errors against physical time and return ax.
+
+    errors maps labels to fractional arrays of shape (n_times,). Values are
+    converted to percentages for display. This function does not call show()."""
     import matplotlib.pyplot as plt
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 4))
@@ -458,14 +489,14 @@ def plot_error_evolution(time_grid, errors, ax=None):
 def gif_compare(name, u_fom, u_rom, Vh, time_grid, *, figsize=(15,4),
                 titles=('FOM','POD-NN','Absolute error'),
                 error_scale='fixed', max_frames=None):
-    """GIF di due campi (Nt,Nh) e loro errore assoluto puntuale, non norma L2.
+    """Save a GIF of FOM/ROM fields and their pointwise absolute difference.
 
-    Scale FOM/ROM comuni e fisse; errore fisso di default per confrontare tempi,
-    oppure error_scale='dynamic'. time_grid: tempi fisici dei frame originali.
-    max_frames opzionale sottocampiona includendo il frame finale. Il ritmo
-    della GIF e quello del writer del corso, non una simulazione in tempo reale.
-    Restituisce name. Utilizza fe.gifs.save come nel notebook originale.
-    """
+    Both fields have shape (n_times,n_dofs); time_grid contains physical times.
+    FOM and ROM share fixed color limits. Error limits are fixed by default,
+    or vary per frame with error_scale='dynamic'. max_frames optionally
+    subsamples frames; linspace includes the final time when at least two
+    frames are selected. Playback timing follows the course GIF writer, not
+    physical simulation time. Return name after saving through fe.gifs.save."""
     import matplotlib.pyplot as plt
     import dlroms.fespaces as fe
     from dlroms.fespaces import gifs
@@ -484,6 +515,7 @@ def gif_compare(name, u_fom, u_rom, Vh, time_grid, *, figsize=(15,4),
     upper = max(upper, lower+1e-12)
     cmap = modify_jet_to_gray()
     def drawframe(i):
+        """Draw one selected FOM/ROM/error frame for the GIF writer."""
         j = indices[i]
         plt.figure(figsize=figsize)
         for panel, field in enumerate((true, pred, error)):
@@ -501,19 +533,20 @@ def gif_compare(name, u_fom, u_rom, Vh, time_grid, *, figsize=(15,4),
 
 def benchmark_rom(model, X_trajectory, scaler, basis, *, n_repeats=100,
                   warmup=20, fom_time=None):
-    """Tempi in secondi, input preparati: NN+unscaling+CPU transfer+ricostruzione.
+    """Measure prepared-input inference time in seconds, including reconstruction.
 
-    Esclude preparazione input, caricamento e training. Sincronizza CUDA prima
-    e dopo ogni misura. Include overhead della funzione di inferenza. fom_time
-    opzionale deve riferirsi alla stessa traiettoria/intervallo e hardware
-    comparabile. Output times, mean, median, std e speedup opzionale.
-    """
+    Include network evaluation, coefficient unscaling, CPU transfer, and full-field
+    reconstruction; exclude input preparation, loading, and training. Synchronize
+    CUDA around each measurement. Return times, mean, median, std, and optional
+    speedup=fom_time/mean. The reference fom_time must cover the same trajectory
+    and time interval on comparable hardware."""
     import torch
     if n_repeats<1 or warmup<0 or (fom_time is not None and fom_time<=0):
         raise ValueError('Parametri benchmark non validi')
     parameter = next(model.parameters())
     X = torch.as_tensor(X_trajectory, dtype=parameter.dtype, device=parameter.device)
     def synchronize():
+        """Wait for pending CUDA operations when the model uses a CUDA device."""
         if parameter.device.type=='cuda':
             torch.cuda.synchronize(parameter.device)
     for _ in range(warmup):
@@ -534,23 +567,10 @@ def benchmark_rom(model, X_trajectory, scaler, basis, *, n_repeats=100,
 
 
 def plot_parameter_splits(mu_train, mu_val, mu_test):
-    """
-    Visualizza tutte le coppie di parametri per train/validation/test.
+    """Plot all parameter pairs for training, validation, and test trajectories.
 
-    Input
-    -----
-    mu_train, mu_val, mu_test : array (n_trajectories, n_parameters)
-        Parametri di ogni split, con lo stesso numero e ordine di colonne.
-
-    Output
-    ------
-    fig, axes
-        Figura Matplotlib e array degli assi.
-
-    Serve dopo lo split, per individuare zone poco campionate o differenze
-    di copertura. I limiti degli assi sono ricavati dai dati.
-    Non chiama plt.show().
-    """
+    Each input has shape (n_trajectories,n_parameters) with matching column order.
+    Axis limits follow the data. Return (fig, axes) without calling show()."""
     from itertools import combinations
     import numpy as np
     import matplotlib.pyplot as plt
@@ -600,16 +620,10 @@ def plot_parameter_splits(mu_train, mu_val, mu_test):
 
 
 def summarize_parameter_splits(mu_train, mu_val, mu_test):
-    """
-    Restituisce min, max, media e deviazione standard per split e parametro.
+    """Return a pandas table of min, max, mean, and std per split and parameter.
 
-    Input: tre array (n_trajectories, n_parameters).
-    Output: DataFrame pandas, con una riga per coppia split/parametro.
-
-    La deviazione standard usa ddof=0, come np.std nel notebook originale.
-    Serve per confrontare quantitativamente copertura e distribuzione.
-    Non stampa né modifica i dati.
-    """
+    Inputs are arrays (n_trajectories,n_parameters) with matching columns.
+    Standard deviations use ddof=0. No input modification or printing is performed."""
     import numpy as np
     import pandas as pd
 
@@ -644,41 +658,17 @@ def summarize_parameter_splits(mu_train, mu_val, mu_test):
 
 def diagnose_parameter_splits(mu_train, mu_val, mu_test):
 
-    """
-    Diagnostica quantitativa degli split nello spazio dei parametri.
+    """Measure marginal balance and joint parameter coverage across splits.
 
-    Input
-    -----
-    mu_train, mu_val, mu_test : array (n_trajectories, n_parameters)
-        Matrici finite, con lo stesso ordine delle colonne.
-        Per le distanze, i parametri devono avere scale confrontabili:
-        nell'u-bolt sono già normalizzati in [0, 1].
-
-    Output
-    ------
-    balance : pandas.DataFrame
-        Per ogni parametro e split:
-        - min, max, mean, std;
-        - mean_shift_std: differenza assoluta dalla media del training,
-          divisa per la deviazione standard del training;
-        - std_ratio: deviazione standard dello split / quella del training.
-
-    coverage : pandas.DataFrame
-        Per ogni split:
-        - numero di traiettorie;
-        - mediana, percentile 90 e massimo della distanza dal training;
-        - percentuale di punti dentro l'inviluppo convesso del training.
-
-        Per il training, le distanze escludono il punto stesso.
-        Se l'inviluppo non è costruibile, la percentuale è NaN e il motivo
-        viene riportato nella colonna hull_status.
-
-    Interpretazione
-    ---------------
-    mean_shift_std vicino a 0 e std_ratio vicino a 1 indicano distribuzioni
-    marginali simili. Le distanze descrivono la copertura congiunta.
-    Non vengono applicate soglie automatiche né modificato lo split.
-    """
+    Inputs are finite arrays (n_trajectories,n_parameters) with matching columns.
+    Parameters must use comparable scales for distances (U-bolt uses [0,1]).
+    Return (balance, coverage), two pandas DataFrames. balance contains min, max,
+    mean, std, absolute mean shift divided by training std, and std/training std.
+    coverage contains trajectory counts, median/90th-percentile/maximum nearest
+    training distances, and percentages inside the training convex hull. Training
+    distances exclude each point itself. Failed hull construction gives NaN
+    coverage and a hull_status explanation. No thresholds or split changes are
+    applied automatically."""
     import numpy as np
     import pandas as pd
     from scipy.spatial import Delaunay, QhullError
@@ -808,6 +798,12 @@ def plot_pod_analysis(
     total_energy,
     thresholds=(0.90, 0.95, 0.99, 0.999, 0.9999),
 ):
+    """Plot singular-value decay and cumulative energy; print threshold mode counts.
+
+    s contains retained singular values in descending order. total_energy is
+    the full snapshot energy, including omitted modes. Return (cumulative_energy,
+    threshold_modes), where the dictionary contains only thresholds reached by
+    the supplied modes. This function calls plt.show()."""
     import numpy as np
     import matplotlib.pyplot as plt
 
@@ -915,6 +911,7 @@ def run_cached_experiment(config, X_train, A_train, X_val, A_val, scaler,
     from scipy import sparse
 
     def fingerprint(value):
+        """Update the experiment hash with array contents, sparse structure, or scalar metadata."""
         h = hashlib.sha256()
         if sparse.issparse(value):
             a = value.tocsr(copy=True)
@@ -1010,4 +1007,4 @@ def run_cached_experiment(config, X_train, A_train, X_val, A_val, scaler,
     return dict(**result, model=model, metrics=metrics,
                 parameters=count_parameters(model), experiment_id=experiment_id,
                 checkpoint_path=str(path), cached=cached)
-    
+

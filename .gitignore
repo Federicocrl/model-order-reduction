@@ -2,9 +2,12 @@
 /*
 
 # Keep assignments
-!/Assignment1/
-!/Assignment2/
+!/01-FEM-Surrogate-Modelling/
+!/02-Dynamical_Systems-ROM/
 !/.gitignore
+!/README.md
+!/PROBLEM_STATEMENT.md
+!/KEY_RESULTS.md
 
 # Python cache
 __pycache__/
@@ -12,8 +15,28 @@ __pycache__/
 .ipynb_checkpoints/
 
 # Trained models and artifacts
-/Assignment2/models/
-/Assignment2/artifacts/
+/02-Dynamical_Systems-ROM/models/
+/02-Dynamical_Systems-ROM/artifacts/*
+!/02-Dynamical_Systems-ROM/artifacts/final_dynamics/
+/02-Dynamical_Systems-ROM/artifacts/final_dynamics/*
+!/02-Dynamical_Systems-ROM/artifacts/final_dynamics/gifs/
+/02-Dynamical_Systems-ROM/artifacts/final_dynamics/gifs/*
+!/02-Dynamical_Systems-ROM/artifacts/final_dynamics/gifs/damage_evolution_corrected.gif
+!/02-Dynamical_Systems-ROM/artifacts/final_dynamics/gifs/damage_evolution_low_reaction.gif
+
+# Development notebooks, audits, and temporary mesh files
+**/old/
+/02-Dynamical_Systems-ROM/IV_complete.ipynb
+/02-Dynamical_Systems-ROM/u-bolt_*.ipynb
+/02-Dynamical_Systems-ROM/[0-9]*.geo
+/02-Dynamical_Systems-ROM/[0-9]*.xml
+/02-Dynamical_Systems-ROM/matplotlib_test.png
+
+# Additional development animations
+/02-Dynamical_Systems-ROM/PODNN_test_comparison.gif
+/02-Dynamical_Systems-ROM/test_best.gif
+/02-Dynamical_Systems-ROM/test_representative.gif
+/02-Dynamical_Systems-ROM/test_worst.gif
 
 # Datasets
 *.npz
